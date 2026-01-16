@@ -1,0 +1,588 @@
+blueprint:
+  name: Iluminação com Sensor Master e Entidades Auxiliares
+  description: >
+    Automação de iluminação baseada em sensor master (lógica OR de sensores principais).
+    Para cada luz existe uma entidade auxiliar que define o desejo de controle.
+    Suporta sensor de luminância ou horário para ativação.
+    Inclui sensores auxiliares para confirmação de saída com delays configuráveis.
+    Possui proteções contra estados inconsistentes e timeouts para segurança.
+  domain: automation
+  input:
+    main_sensors:
+      name: Sensores Principais de Presença
+      description: Lista de sensores que compõem o sensor master (lógica OR).
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+    
+    aux_sensors:
+      name: Sensores Auxiliares de Transição (Opcional)
+      description: Sensores que confirmam a saída do ambiente.
+      default: []
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+    
+    lux_sensor:
+      name: Sensor de Luminosidade (Opcional)
+      description: Sensor de luminância para controle automático.
+      default: none
+      selector:
+        entity:
+          domain: sensor
+          device_class: illuminance
+    
+    lux_threshold:
+      name: Limite de Luminosidade para Ligar
+      description: Luminância máxima para acionar as luzes (lux).
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: lx
+    
+    lux_threshold_off:
+      name: Limite de Luminosidade para Desligar
+      description: Luminância mínima para desligar as luzes (lux). Deve ser maior que o limite para ligar.
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: lx
+    
+    use_time_control:
+      name: Usar Controle por Horário
+      description: Ativar controle por horário quando sensor de luminância não estiver disponível.
+      default: true
+      selector:
+        boolean: {}
+    
+    time_start:
+      name: Horário de Início
+      description: Horário a partir do qual as luzes podem acender.
+      default: "18:00:00"
+      selector:
+        time: {}
+    
+    time_end:
+      name: Horário de Término
+      description: Horário até o qual as luzes podem acender.
+      default: "06:00:00"
+      selector:
+        time: {}
+    
+    use_sun_entity:
+      name: Usar Entidade do Sol
+      description: Usar horários do nascer/pôr do sol ao invés de horários fixos.
+      default: false
+      selector:
+        boolean: {}
+    
+    lights:
+      name: Luzes do Ambiente
+      description: Lista de luzes a serem controladas.
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    
+    helper_booleans:
+      name: Entidades Auxiliares (Input Booleans)
+      description: Input booleans correspondentes a cada luz (mesma ordem e quantidade).
+      selector:
+        entity:
+          domain: input_boolean
+          multiple: true
+    
+    aux_sensor_delay:
+      name: Delay do Sensor Auxiliar (segundos)
+      description: Tempo de espera quando sensor auxiliar detecta presença.
+      default: 5
+      selector:
+        number:
+          min: 2
+          max: 30
+          unit_of_measurement: s
+    
+    use_triple_delay:
+      name: Usar Delay Triplo para Sensor Master FALSE
+      description: Multiplicar delay por 3 quando sensor master já está em FALSE.
+      default: true
+      selector:
+        boolean: {}
+    
+    master_false_timeout:
+      name: Timeout para Sensor Master FALSE (segundos)
+      description: Tempo que o sensor master pode ficar FALSE antes de desligar luzes (proteção contra saída mascarada). Só funciona quando há sensores auxiliares. 0 = desabilitado.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 600
+          unit_of_measurement: s
+    
+    enable_sync:
+      name: Habilitar Sincronização Periódica
+      description: Sincroniza luzes e helpers a cada minuto (luz ON + helper OFF).
+      default: true
+      selector:
+        boolean: {}
+
+trigger:
+  # Trigger nos sensores principais
+  - platform: state
+    entity_id: !input main_sensors
+    id: "main_sensor_change"
+  
+  # Trigger nos sensores auxiliares
+  - platform: state
+    entity_id: !input aux_sensors
+    to: "on"
+    id: "aux_sensor_triggered"
+  
+  # Trigger nas luzes (para sincronizar helpers)
+  - platform: state
+    entity_id: !input lights
+    id: "light_state_change"
+  
+  # Trigger nos helpers (para desligar luz quando helper desliga)
+  - platform: state
+    entity_id: !input helper_booleans
+    to: "off"
+    id: "helper_turned_off"
+  
+  # Trigger no sensor de luminância
+  - platform: state
+    entity_id: !input lux_sensor
+    id: "lux_change"
+  
+  # Trigger nos horários
+  - platform: time
+    at: !input time_start
+    id: "time_start_trigger"
+  
+  - platform: time
+    at: !input time_end
+    id: "time_end_trigger"
+  
+  # Trigger para sincronização periódica
+  - platform: time_pattern
+    minutes: "/1"
+    id: "periodic_sync"
+  
+  # Trigger na inicialização do HA
+  - platform: homeassistant
+    event: start
+    id: "ha_restart"
+
+condition: []
+
+action:
+  - variables:
+      main_sensors: !input main_sensors
+      aux_sensors: !input aux_sensors
+      lux_sensor: !input lux_sensor
+      lux_threshold: !input lux_threshold
+      lux_threshold_off: !input lux_threshold_off
+      use_time_control: !input use_time_control
+      time_start: !input time_start
+      time_end: !input time_end
+      use_sun_entity: !input use_sun_entity
+      lights: !input lights
+      helpers: !input helper_booleans
+      aux_delay: !input aux_sensor_delay
+      use_triple_delay: !input use_triple_delay
+      master_timeout: !input master_false_timeout
+      enable_sync: !input enable_sync
+      
+      # Valida configuração
+      config_valid: "{{ lights | length == helpers | length }}"
+      
+      # Filtra entidades válidas (existentes)
+      valid_lights: >
+        {{ lights | select('is_state', 'on') | list + lights | select('is_state', 'off') | list }}
+      valid_helpers: >
+        {{ helpers | select('is_state', 'on') | list + helpers | select('is_state', 'off') | list }}
+      
+      # Calcula o sensor master (OR de todos os sensores principais válidos)
+      sensor_master: >
+        {% set valid_sensors = main_sensors | reject('is_state', 'unavailable') | reject('is_state', 'unknown') | list %}
+        {% if valid_sensors | length == 0 %}
+          {{ false }}
+        {% else %}
+          {{ valid_sensors | select('is_state', 'on') | list | count > 0 }}
+        {% endif %}
+      
+      # Verifica condição de luminância para LIGAR
+      lux_ok_on: >
+        {% if lux_sensor == 'none' %}
+          {{ false }}
+        {% else %}
+          {% set lux_state = states(lux_sensor) %}
+          {% if lux_state in ['unavailable', 'unknown', 'none'] %}
+            {{ false }}
+          {% else %}
+            {% set lux_value = lux_state | float(-1) %}
+            {{ lux_value >= 0 and lux_value <= lux_threshold }}
+          {% endif %}
+        {% endif %}
+      
+      # Verifica condição de luminância para DESLIGAR
+      lux_should_off: >
+        {% if lux_sensor == 'none' %}
+          {{ false }}
+        {% else %}
+          {% set lux_state = states(lux_sensor) %}
+          {% if lux_state in ['unavailable', 'unknown', 'none'] %}
+            {{ false }}
+          {% else %}
+            {% set lux_value = lux_state | float(-1) %}
+            {{ lux_value >= 0 and lux_value >= lux_threshold_off }}
+          {% endif %}
+        {% endif %}
+      
+      # Verifica se está no horário permitido
+      time_ok: >
+        {% if not use_time_control %}
+          {{ false }}
+        {% elif use_sun_entity %}
+          {% set sun_state = states('sun.sun') %}
+          {% if sun_state in ['unavailable', 'unknown', 'none'] %}
+            {# Fallback para horário fixo se sun.sun não disponível #}
+            {% set hora_atual = now().strftime('%H:%M:%S') %}
+            {% set inicio = time_start %}
+            {% set fim = time_end %}
+            {% if inicio < fim %}
+              {{ inicio <= hora_atual < fim }}
+            {% else %}
+              {{ hora_atual >= inicio or hora_atual < fim }}
+            {% endif %}
+          {% else %}
+            {{ sun_state == 'below_horizon' }}
+          {% endif %}
+        {% else %}
+          {% set hora_atual = now().strftime('%H:%M:%S') %}
+          {% set inicio = time_start %}
+          {% set fim = time_end %}
+          {% if inicio < fim %}
+            {{ inicio <= hora_atual < fim }}
+          {% else %}
+            {{ hora_atual >= inicio or hora_atual < fim }}
+          {% endif %}
+        {% endif %}
+      
+      # Define se pode ligar luzes (luminância OU horário)
+      pode_ligar: "{{ lux_ok_on or time_ok }}"
+
+  # Validação de configuração
+  - choose:
+      - conditions:
+          - "{{ not config_valid }}"
+        sequence:
+          - service: persistent_notification.create
+            data:
+              title: "⚠️ Erro na Automação de Iluminação"
+              message: >
+                A automação {{ this.entity_id }} tem configuração inválida:
+                - Número de luzes: {{ lights | length }}
+                - Número de helpers: {{ helpers | length }}
+                
+                O número de luzes e helpers deve ser igual!
+              notification_id: "{{ this.entity_id }}_config_error"
+          - stop: "Configuração inválida"
+
+  # Verifica entidades deletadas
+  - choose:
+      - conditions:
+          - "{{ valid_lights | length != lights | length or valid_helpers | length != helpers | length }}"
+        sequence:
+          - service: persistent_notification.create
+            data:
+              title: "⚠️ Entidades Inexistentes na Automação"
+              message: >
+                A automação {{ this.entity_id }} detectou entidades que não existem mais:
+                {% if valid_lights | length != lights | length %}
+                - Luzes configuradas: {{ lights | length }}
+                - Luzes válidas: {{ valid_lights | length }}
+                {% endif %}
+                {% if valid_helpers | length != helpers | length %}
+                - Helpers configurados: {{ helpers | length }}
+                - Helpers válidos: {{ valid_helpers | length }}
+                {% endif %}
+                
+                Verifique a configuração da automação.
+              notification_id: "{{ this.entity_id }}_missing_entities"
+
+  - choose:
+      # ====================================================================
+      # CASO 1: Inicialização do HA - Sincroniza estados
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'ha_restart' }}"
+        sequence:
+          # Sincroniza helpers com luzes (se luz ON, liga helper)
+          - repeat:
+              count: "{{ valid_lights | length }}"
+              sequence:
+                - variables:
+                    light_entity: "{{ valid_lights[repeat.index - 1] }}"
+                    light_idx: "{{ lights.index(light_entity) }}"
+                    helper_entity: "{{ helpers[light_idx] }}"
+                - condition: template
+                  value_template: "{{ helper_entity in valid_helpers }}"
+                - choose:
+                    - conditions:
+                        - "{{ is_state(light_entity, 'on') and is_state(helper_entity, 'off') }}"
+                      sequence:
+                        - service: input_boolean.turn_on
+                          target:
+                            entity_id: "{{ helper_entity }}"
+      
+      # ====================================================================
+      # CASO 2: Sincronização periódica (luz ON + helper OFF)
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'periodic_sync' }}"
+          - "{{ enable_sync }}"
+        sequence:
+          - repeat:
+              count: "{{ valid_lights | length }}"
+              sequence:
+                - variables:
+                    light_entity: "{{ valid_lights[repeat.index - 1] }}"
+                    light_idx: "{{ lights.index(light_entity) }}"
+                    helper_entity: "{{ helpers[light_idx] }}"
+                - condition: template
+                  value_template: "{{ helper_entity in valid_helpers }}"
+                - condition: template
+                  value_template: "{{ is_state(light_entity, 'on') and is_state(helper_entity, 'off') }}"
+                - service: input_boolean.turn_on
+                  target:
+                    entity_id: "{{ helper_entity }}"
+      
+      # ====================================================================
+      # CASO 3: Sensor Master mudou de estado
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'main_sensor_change' }}"
+        sequence:
+          - choose:
+              # Sensor Master mudou para TRUE (presença detectada)
+              - conditions:
+                  - "{{ sensor_master }}"
+                  - "{{ pode_ligar }}"
+                sequence:
+                  # Liga todas as luzes cujo helper está ON
+                  - repeat:
+                      count: "{{ valid_lights | length }}"
+                      sequence:
+                        - variables:
+                            light_entity: "{{ valid_lights[repeat.index - 1] }}"
+                            light_idx: "{{ lights.index(light_entity) }}"
+                            helper_entity: "{{ helpers[light_idx] }}"
+                        - condition: template
+                          value_template: "{{ helper_entity in valid_helpers and is_state(helper_entity, 'on') }}"
+                        - service: light.turn_on
+                          target:
+                            entity_id: "{{ light_entity }}"
+                          data:
+                            transition: 0
+              
+              # Sensor Master mudou para FALSE (ausência detectada)
+              - conditions:
+                  - "{{ not sensor_master }}"
+                sequence:
+                  - choose:
+                      # Se NÃO há sensores auxiliares, desliga imediatamente
+                      - conditions:
+                          - "{{ aux_sensors | length == 0 }}"
+                        sequence:
+                          - service: light.turn_off
+                            target:
+                              entity_id: !input lights
+                            data:
+                              transition: 0
+                      
+                      # Se há sensores auxiliares E timeout configurado, aguarda antes de desligar
+                      - conditions:
+                          - "{{ aux_sensors | length > 0 }}"
+                          - "{{ master_timeout > 0 }}"
+                        sequence:
+                          - wait_template: "{{ sensor_master }}"
+                            timeout:
+                              seconds: "{{ master_timeout }}"
+                          # Se timeout completou (master continua FALSE), desliga
+                          - condition: template
+                            value_template: "{{ not wait.completed }}"
+                          - service: light.turn_off
+                            target:
+                              entity_id: !input lights
+                            data:
+                              transition: 0
+      
+      # ====================================================================
+      # CASO 4: Sensor Auxiliar detectou presença
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'aux_sensor_triggered' }}"
+        sequence:
+          - variables:
+              master_is_false: "{{ not sensor_master }}"
+              delay_seconds: >
+                {% if master_is_false and use_triple_delay %}
+                  {{ aux_delay * 3 }}
+                {% else %}
+                  {{ aux_delay }}
+                {% endif %}
+          
+          - choose:
+              # Se master está TRUE, aguarda ele mudar para FALSE
+              - conditions:
+                  - "{{ not master_is_false }}"
+                sequence:
+                  - wait_template: "{{ not sensor_master }}"
+                    timeout:
+                      seconds: "{{ delay_seconds }}"
+                  # Se master foi para FALSE, desliga luzes
+                  - condition: template
+                    value_template: "{{ wait.completed }}"
+                  - service: light.turn_off
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: 0
+              
+              # Se master já está FALSE, aguarda delay e verifica se continua FALSE
+              - conditions:
+                  - "{{ master_is_false }}"
+                sequence:
+                  - wait_template: "{{ sensor_master }}"
+                    timeout:
+                      seconds: "{{ delay_seconds }}"
+                  # Se o master NÃO mudou para TRUE (continua FALSE), desliga
+                  - condition: template
+                    value_template: "{{ not wait.completed }}"
+                  - service: light.turn_off
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: 0
+      
+      # ====================================================================
+      # CASO 5: Mudança no sensor de luminância
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'lux_change' }}"
+        sequence:
+          - choose:
+              # Se ficou escuro E sensor master TRUE, liga luzes
+              - conditions:
+                  - "{{ lux_ok_on }}"
+                  - "{{ sensor_master }}"
+                sequence:
+                  - repeat:
+                      count: "{{ valid_lights | length }}"
+                      sequence:
+                        - variables:
+                            light_entity: "{{ valid_lights[repeat.index - 1] }}"
+                            light_idx: "{{ lights.index(light_entity) }}"
+                            helper_entity: "{{ helpers[light_idx] }}"
+                        - condition: template
+                          value_template: "{{ helper_entity in valid_helpers and is_state(helper_entity, 'on') }}"
+                        - service: light.turn_on
+                          target:
+                            entity_id: "{{ light_entity }}"
+                          data:
+                            transition: 0
+              
+              # Se ficou claro demais, desliga luzes
+              - conditions:
+                  - "{{ lux_should_off }}"
+                sequence:
+                  - service: light.turn_off
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: 0
+      
+      # ====================================================================
+      # CASO 6: Trigger de horário (início ou fim)
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id in ['time_start_trigger', 'time_end_trigger'] }}"
+        sequence:
+          - choose:
+              # Se entrou no horário permitido E sensor master TRUE, liga luzes
+              - conditions:
+                  - "{{ trigger.id == 'time_start_trigger' }}"
+                  - "{{ sensor_master }}"
+                  - "{{ time_ok }}"
+                sequence:
+                  - repeat:
+                      count: "{{ valid_lights | length }}"
+                      sequence:
+                        - variables:
+                            light_entity: "{{ valid_lights[repeat.index - 1] }}"
+                            light_idx: "{{ lights.index(light_entity) }}"
+                            helper_entity: "{{ helpers[light_idx] }}"
+                        - condition: template
+                          value_template: "{{ helper_entity in valid_helpers and is_state(helper_entity, 'on') }}"
+                        - service: light.turn_on
+                          target:
+                            entity_id: "{{ light_entity }}"
+                          data:
+                            transition: 0
+      
+      # ====================================================================
+      # CASO 7: Luz mudou de estado
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'light_state_change' }}"
+          - "{{ trigger.entity_id in valid_lights }}"
+        sequence:
+          - variables:
+              light_idx: "{{ lights.index(trigger.entity_id) }}"
+              helper_entity: "{{ helpers[light_idx] }}"
+          - condition: template
+            value_template: "{{ helper_entity in valid_helpers }}"
+          - choose:
+              # Luz ligou → liga helper
+              - conditions:
+                  - "{{ is_state(trigger.entity_id, 'on') }}"
+                sequence:
+                  - service: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ helper_entity }}"
+              
+              # Luz apagou → desliga helper (se não foi a automação que apagou)
+              - conditions:
+                  - "{{ is_state(trigger.entity_id, 'off') }}"
+                  - "{{ trigger.to_state.context.parent_id != this.context.id }}"
+                sequence:
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ helper_entity }}"
+      
+      # ====================================================================
+      # CASO 8: Helper foi desligado → desliga luz correspondente
+      # ====================================================================
+      - conditions:
+          - "{{ trigger.id == 'helper_turned_off' }}"
+          - "{{ trigger.entity_id in valid_helpers }}"
+        sequence:
+          - variables:
+              helper_idx: "{{ helpers.index(trigger.entity_id) }}"
+              light_entity: "{{ lights[helper_idx] }}"
+          - condition: template
+            value_template: "{{ light_entity in valid_lights }}"
+          - service: light.turn_off
+            target:
+              entity_id: "{{ light_entity }}"
+            data:
+              transition: 0
+
+mode: restart
