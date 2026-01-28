@@ -5,9 +5,9 @@
 blueprint:
   name: Iluminação Adaptativa Multi-Sensor
   description: >
-    Versão simplificada. Acende luzes quando qualquer sensor detecta presença (OR).
-    Desliga luzes quando nenhum sensor detecta presença, com opção de sensor auxiliar de transição.
-    Inclui transição para modo noturno com ativação de luzes noturnas e desativação de outras.
+    Controla luzes usando múltiplos sensores de presença para rastreamento 
+    preciso de localização, sensor de luminosidade para automação inteligente, 
+    e modo noturno com despertar automático.
         
     **IMPORTANTE:** Sensor de luminosidade é obrigatório para função despertar.
     Se não tiver sensor físico, crie um sensor template.
