@@ -1,0 +1,405 @@
+# Version: 2.3.9 
+# Author: ophantom
+
+
+blueprint:
+  name: Iluminação Adaptativa Multi-Sensor
+  description: >
+    Versão simplificada. Acende luzes quando qualquer sensor detecta presença (OR).
+    Desliga luzes quando nenhum sensor detecta presença, com opção de sensor auxiliar de transição.
+    Inclui transição para modo noturno com ativação de luzes noturnas e desativação de outras.
+        
+    **IMPORTANTE:** Sensor de luminosidade é obrigatório para função despertar.
+    Se não tiver sensor físico, crie um sensor template.
+  domain: automation
+  input:
+    motion_sensor:
+      name: Sensores de Movimento
+      description: Lista de sensores de presença do cômodo.
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+    aux_sensor:
+      name: Sensor Auxiliar de Transição (Opcional)
+      default: []
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+    lux_sensor:
+      name: Sensor de Luminosidade
+      description: Ele será usado para definir quando é interessante ligar e desligar as luzes.
+                   Se não tiver sensor físico, crie um sensor template baseado em sun.sun.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: illuminance
+    lux_threshold:
+      name: "Limite de Luminosidade para Ligar"
+      description: "Luminância máxima para acionar as luzes (lux)."
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: lx    
+    lux_threshold_off:
+      name: "Limite de Luminosidade para Desligar"
+      description: "Luminância mínima para desligar as luzes (lux). Deve ser maior que o limite para ligar."
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: lx
+    lights:
+      name: Luzes do Cômodo
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    helper_booleans:
+      name: Input_booleans Correspondentes
+      selector:
+        entity:
+          domain: input_boolean
+          multiple: true
+    lights_night:
+      name: Luzes Noturnas
+      description: Lista de luzes que podem acender durante a madrugada.
+                   Estas luzes devem ser um subconjunto das 'Luzes do Cômodo'.
+      default: []
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    noite_inicio:
+      name: Início do Horário Noturno
+      description: "Horário a partir do qual as luzes noturnas são ativadas (ex: 23:00)."
+      default: "23:00:00"
+      selector:
+        time: {}
+    noite_fim:
+      name: Fim do Horário Noturno (Despertar)
+      description: "Horário em que o modo noturno termina (ex: 06:00).
+                   Neste momento, as luzes noturnas são preparadas para acenderem quando houver movimento. 
+                   Funciona como um despertar automático do sistema de iluminação."
+      default: "06:00:00"
+      selector:
+        time: {}
+    delay_saida:
+      name: Tempo de Delay para Saída (segundos)
+      description: Quantos segundos esperar antes de desligar as luzes após saída confirmada
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: segundos
+    confirmacao_ausencia:
+      name:  Tempo de Confirmação de Ausência (segundos)
+      description: >
+        Quando o sensor auxiliar detecta movimento mas os sensores do ambiente 
+        não detectam ninguém (luz pode ter ficado acesa acidentalmente), 
+        espera esse tempo antes de desligar. Se alguém aparecer durante a 
+        espera, as luzes permanecem acesas.
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 150
+          unit_of_measurement: segundos
+
+
+trigger:
+  - platform: numeric_state
+    entity_id: !input lux_sensor
+    below: !input lux_threshold
+    id: lux_ficou_escuro
+  - platform: numeric_state
+    entity_id: !input lux_sensor
+    above: !input lux_threshold_off
+    id: lux_ficou_claro
+  - platform: time
+    at: !input noite_fim
+    id: "night_mode_end"
+  - platform: state
+    entity_id: !input motion_sensor
+  - platform: state
+    entity_id: !input aux_sensor
+  - platform: state
+    entity_id: !input helper_booleans
+  - platform: state
+    entity_id: !input lights
+  - platform: time
+    at: !input noite_inicio
+    id: "night_mode_transition" # ID para identificar este trigger
+
+condition: []
+
+action:
+  - variables:
+      motion_sensor: !input motion_sensor
+      aux_sensor: !input aux_sensor
+      lux_sensor: !input lux_sensor
+      lux_threshold: !input lux_threshold
+      lux_threshold_off: !input lux_threshold_off
+      lights: !input lights
+      helpers: !input helper_booleans
+      lights_night: !input lights_night
+      noite_inicio: !input noite_inicio
+      noite_fim: !input noite_fim
+
+      algum_presente: >
+        {{ motion_sensor | select('is_state', 'on') | list | count > 0 }}
+
+      saida_confirmada: >
+        {% if aux_sensor == [] %}
+          {{ true }}
+        {% else %}
+          {% set valid_aux_sensors = aux_sensor | reject('is_state', 'unavailable') | reject('is_state', 'unknown') | list %}
+          {% if valid_aux_sensors | length == 0 %} {# Se não há sensores auxiliares em estado 'on' ou 'off' (todos são unavailable/unknown) #}
+            {{ true }}
+          {% else %} {# Se há sensores auxiliares em estado 'on' ou 'off' #}
+            {{ valid_aux_sensors | select('is_state', 'on') | list | count > 0 }}
+          {% endif %}
+        {% endif %}
+
+      lux_ok: >
+        {% if not lux_sensor or lux_sensor == '' or states(lux_sensor) in ['unavailable', 'unknown', 'none'] %}
+          {{ is_state('sun.sun', 'below_horizon') }}
+        {% else %}
+          {{ states(lux_sensor) | int(0) < lux_threshold }}
+        {% endif %}
+
+      lux_apaga: >
+        {% if not lux_sensor or lux_sensor == '' or states(lux_sensor) in ['unavailable', 'unknown', 'none'] %}
+          {{ is_state('sun.sun', 'above_horizon') }}
+        {% else %}
+          {{ states(lux_sensor) | int(0) > lux_threshold_off }}
+        {% endif %}
+
+      hora_atual: "{{ now().strftime('%H:%M:%S') }}"
+      periodo_noturno: >
+        {% set h = hora_atual %}
+        {% set ini = noite_inicio %}
+        {% set fim = noite_fim %}
+        {% if ini < fim %}
+          {{ ini <= h < fim }}
+        {% else %}
+          {{ h >= ini or h < fim }}
+        {% endif %}
+
+      luzes_ativas: "{{ lights_night if periodo_noturno else lights }}"
+
+  - choose:
+
+
+      # Transição para o modo noturno
+      - conditions:
+          - "{{ trigger.id == 'night_mode_transition' }}"
+        sequence:
+          - variables:
+              # Verifica se alguma luz principal está acesa
+              any_main_lights_on: "{{ lights | select('is_state', 'on') | list | count > 0 }}"
+              
+              # Mapeia as luzes noturnas para seus helpers correspondentes
+              # Assume que lights_night são um subconjunto de lights
+              night_light_helpers: >
+                {% set night_helpers = [] %}
+                {% for light_entity in lights_night %}
+                  {% set idx = lights.index(light_entity) if light_entity in lights else -1 %}
+                  {% if idx != -1 %}
+                    {% set night_helpers = night_helpers + [helpers[idx]] %}
+                  {% endif %}
+                {% endfor %}
+                {{ night_helpers }}
+
+          - variables:
+              # Identifica os helpers que NÃO são de luzes noturnas
+              other_helpers_to_turn_off: >
+                {{ helpers | reject('in', night_light_helpers) | list }}
+
+              # Identifica as LUZES que NÃO são noturnas
+              other_lights_to_turn_off: >
+                {{ lights | reject('in', lights_night) | list }}
+
+          # Ação: Ligar helpers das luzes noturnas (e as luzes se outras estavam acesas)
+          - repeat:
+              count: "{{ lights_night | length }}"
+              sequence:
+                - variables:
+                    idx: "{{ repeat.index - 1 }}"
+                    night_light: "{{ lights_night[idx] }}"
+                    # Encontra o helper correspondente à luz noturna atual
+                    night_light_helper_idx: "{{ lights.index(night_light) if night_light in lights else -1 }}"
+                    night_light_helper: "{{ helpers[night_light_helper_idx] if night_light_helper_idx != -1 else none }}"
+                - service: input_boolean.turn_on
+                  target:
+                    entity_id: "{{ night_light_helper }}"
+                  data: {}
+                - condition: template
+                  value_template: "{{ any_main_lights_on }}" # Só liga a luz se alguma luz principal já estava acesa
+                - service: light.turn_on
+                  target:
+                    entity_id: "{{ night_light }}"
+                  data: {} # Pode adicionar brightness, color_temp se desejar para luzes noturnas
+
+          # Ação: Desligar todos os outros helpers
+          - service: input_boolean.turn_off
+            target:
+              entity_id: "{{ other_helpers_to_turn_off }}"
+            data: {}
+
+          # NOVO: Desligar todas as luzes que NÃO são noturnas
+          - service: light.turn_off
+            target:
+              entity_id: "{{ other_lights_to_turn_off }}"
+            data: {}
+
+
+      # Fim do período noturno (despertar)
+      - conditions:
+          - "{{ trigger.id == 'night_mode_end' }}"
+        sequence:
+          - variables:
+              night_light_helpers: >
+                {% set ns = namespace(helpers=[]) %}
+                {% for light_entity in lights_night %}
+                  {% if light_entity in lights %}
+                    {% set ns.helpers = ns.helpers + [helpers[lights.index(light_entity)]] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.helpers }}
+
+          # Liga helpers das luzes noturnas
+          - service: input_boolean.turn_on
+            target:
+              entity_id: "{{ night_light_helpers }}"
+
+
+      # Ligar luzes se qualquer sensor detectar presença (lógica existente)
+      - conditions:
+          - "{{ trigger.entity_id in motion_sensor or trigger.id == 'lux_ficou_escuro' }}"
+          - "{{ algum_presente and lux_ok }}"
+        sequence:
+          - repeat:
+              count: "{{ luzes_ativas | length }}"
+              sequence:
+                - variables:
+                    idx: "{{ repeat.index - 1 }}"
+                    light: "{{ luzes_ativas[idx] }}"
+                    helper_idx: "{{ lights.index(light) if light in lights else -1 }}"
+                    helper: "{{ helpers[helper_idx] if helper_idx != -1 else none }}"
+                - condition: template
+                  value_template: "{{ helper is not none and is_state(helper, 'on') }}"
+                - service: light.turn_on
+                  target:
+                    entity_id: "{{ light }}"
+
+
+      # Desligar luzes quando ambiente ficar claro
+      - conditions:
+          - "{{ trigger.id == 'lux_ficou_claro' }}"  # Use o ID
+          - "{{ lux_apaga }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input lights
+
+
+      # Desligar luzes se ninguém presente (e opcionalmente se sensor auxiliar indicar transição) (lógica existente)
+      - conditions:
+          - "{{ trigger.entity_id in motion_sensor}}"
+          - "{{ not algum_presente and saida_confirmada }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input lights
+
+
+      # No caso de delay após saída confirmada:
+      - conditions:
+          - "{{ trigger.entity_id in aux_sensor }}"  # Trigger foi o sensor auxiliar
+          - "{{ not saida_confirmada }}"  # aux_sensor acabou de ir para OFF
+          - "{{ algum_presente }}"  # MAS motion_sensor ainda detecta presença (ON)
+          - "{{ lights | select('is_state', 'on') | list | count > 0 }}"  # Tem luz acesa
+        sequence:
+          - variables:
+              delay_saida: !input delay_saida
+          
+          # Espera até que TODOS os sensores estejam off (ninguém presente) OU até o timeout
+          - wait_template: >
+              {{ motion_sensor | select('is_state', 'on') | list | count == 0 }}
+            timeout:
+              seconds: "{{ delay_saida }}"
+            continue_on_timeout: false
+          
+          # Confirma mais uma vez antes de desligar (segurança extra)
+          - condition: template
+            value_template: >
+              {{ motion_sensor | select('is_state', 'on') | list | count == 0 }}
+          
+          - service: light.turn_off
+            target:
+              entity_id: !input lights
+
+      # No caso de delay após saída confirmada:
+      - conditions:
+          - "{{ trigger.entity_id in aux_sensor }}"  # Trigger foi o sensor auxiliar
+          - "{{ saida_confirmada }}"  # aux_sensor acabou de ir para ON
+          - "{{ not algum_presente }}"  # MAS motion_sensor detecta ausência (OFF)
+          - "{{ lights | select('is_state', 'on') | list | count > 0 }}"  # Mesmo com luz acesa
+        sequence:
+          - variables:
+              delay_saida: !input confirmacao_ausencia
+          
+          # Espera até que algum sensor esteja on (presente) OU até o timeout
+          - wait_template: >
+              {{ motion_sensor | select('is_state', 'on') | list | count > 0 }}
+            timeout:
+              seconds: "{{ confirmacao_ausencia }}"
+            continue_on_timeout: true
+          
+          # Confirma se deu timeout pra desligar as luzes
+          - condition: template
+            value_template: >
+              {{ motion_sensor | select('is_state', 'on') | list | count == 0 }}
+          
+          - service: light.turn_off
+            target:
+              entity_id: !input lights
+
+      # Atualiza helper quando luz é acesa manualmente (Protegido)
+      - conditions:
+          - "{{ trigger.entity_id in lights }}"
+          - "{{ is_state(trigger.entity_id, 'on') }}"
+          - "{{ trigger.to_state.context.id is not none }}"
+          - "{{ trigger.to_state.context.parent_id is none }}" # Só executa se for ação humana direta
+          #- "{{ trigger.to_state.context.user_id is not none }}" # Garante que houve interação na UI ou app
+        sequence:
+          - variables:
+              idx: "{{ lights.index(trigger.entity_id) }}"
+              helper: "{{ helpers[idx] }}"
+          - service: input_boolean.turn_on
+            target:
+              entity_id: "{{ helper }}"
+
+      # Atualiza helper quando luz é desligada manualmente (Protegido)
+      - conditions:
+          - "{{ trigger.entity_id in lights }}"
+          - "{{ is_state(trigger.entity_id, 'off') }}"
+          - "{{ trigger.to_state.context.id is not none }}"
+          - "{{ trigger.to_state.context.parent_id is none }}" # Ignora se o 'pai' do comando for outra automação
+          #- "{{ trigger.to_state.context.user_id is not none }}"
+        sequence:
+          - variables:
+              idx: "{{ lights.index(trigger.entity_id) }}"
+              helper: "{{ helpers[idx] }}"
+          - service: input_boolean.turn_off
+            target:
+              entity_id: "{{ helper }}"
+
+mode: parallel
